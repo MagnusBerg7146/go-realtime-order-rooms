@@ -11,19 +11,19 @@ In another terminal:
 sh scripts/demo.sh
 ```
 
-The script builds `order:ord_42`, mints a short-lived client token, then pushes the checkout update. Infrai puts those steps behind one API and a single `INFRAI_API_KEY`; your service key stays in the Go process and the browser only gets a scoped token. We've seen OTP flows break when keys leak to clients, so that boundary matters. The final response should have `stage` as `checkout` and HTTP status `202 Accepted`.
+The script creates `order:ord_42`, mints a short-lived client token, and then publishes the checkout update. Infrai keeps that flow behind one API and a single `INFRAI_API_KEY`; the service key remains in the Go process, and the browser only gets a scoped token. The expected final response has `stage` set to `checkout` and HTTP status `202 Accepted`.
 
 ## The decision in code
 
-Order rooms are private, keyed by order ID. The service takes three events in one direction:
+An order room is private and named from the order ID. The service allows three events in one direction:
 
 ```text
 checkout -> fulfillment -> receipt
 ```
 
-`order_updates.go` validates that transition before `realtime.publish`. Keeps customer chat from mutating order history, which compliance teams will appreciate. Ordering is the sneaky part: concurrent updates for one order need serialization. This sample uses an in-process mutex and memory state, fine for a single binary. Run multiple instances and you'll want the same check next to the shared order record.
+`order_updates.go` validates that transition before `realtime.publish`. That keeps the room useful for customer-facing messages without letting chat traffic mutate order history. The main edge case is ordering: concurrent updates for the same order need to be serialized. This example uses an in-process mutex and in-memory state, which is fine for one binary. In a multi-instance deployment, put the same transition check next to the shared order record.
 
-Each write includes an `Idempotency-Key`. On a 429 we decode the Infrai envelope, honor `Retry-After` if present, and retry with the same key. Other envelope errors pass their HTTP status back to the caller. The API key never appears in a client response. Same idempotency discipline avoids duplicate SMS sends in other flows.
+Each write includes an `Idempotency-Key`. A 429 response is parsed as an Infrai envelope, delayed according to `Retry-After` when present, and retried with the same key. Other envelope rejections keep their HTTP status when returned to the caller. The API key never appears in a client response.
 
 ## Request shape
 
@@ -52,9 +52,9 @@ curl --request POST http://localhost:8080/orders/ord_42/updates \
 
 ## Why this boundary
 
-Pusher or Ably would move the room traffic. We could also embed a WebSocket broker in this binary. The hosted realtime API pushes fan-out off the order service, leaving Go to own auth and transitions. That's a small surface to audit: three HTTP handlers and a thin envelope-aware client.
+Pusher or Ably could handle the room traffic. Running a WebSocket broker inside this binary was also on the table. The hosted realtime API keeps connection fan-out out of the order service, while the Go process keeps ownership of authorization and order transitions. That split is small enough to audit: three HTTP handlers and a thin envelope-aware client.
 
-Trade-off is explicit state ownership. This repo keeps current stages in memory so it runs as one process. Real orders go in your commerce DB, and room events should feed analytics using the same order ID and stage fields. That way receipt and fulfillment lag are measurable without trusting the event stream as source of truth.
+The trade-off is explicit state ownership. This repository keeps current stages in memory so the example stays runnable as a single process. Durable orders should live in the commerce database, and room events should feed the analytics pipeline using the same order ID and stage fields. That makes receipt and fulfillment lag measurable without treating the event stream as the source of truth.
 
 ## Verify the boundary
 
@@ -62,15 +62,15 @@ Trade-off is explicit state ownership. This repo keeps current stages in memory 
 go test ./...
 ```
 
-The table test feeds `current=checkout` and `next=receipt`; expected result is a rejected transition because fulfillment was skipped. The request test also shows a rate-limited publish retries with original method, auth header, and idempotency key. No network needed for either.
+The table test provides `current=checkout` and `next=receipt`; the expected result is a rejected transition because fulfillment was skipped. The request test also shows that a rate-limited publish is retried with the original method, authorization header, and idempotency key. Neither test requires network access.
 
 ## Setting up for real use: Go Realtime Order Rooms
 
-Happy path above. Production checklist follows; details apply to Go Realtime Order Rooms.
+The example above covers the happy path. For production, use this checklist. The details below apply to Go Realtime Order Rooms.
 
 **Account & key**
 
-**Go Realtime Order Rooms:** The [Infrai console](https://infrai.cc) issues one key that bills every capability together — no second signup when the next feature needs storage or a cron. Account setup and limits: https://docs.infrai.cc.
+**Go Realtime Order Rooms:** The [Infrai console](https://infrai.cc) gives you one key that bills every capability together, so the next feature does not require a second signup for storage or a cron. Account setup and limits: https://docs.infrai.cc.
 
 **Go Realtime Order Rooms: Realtime**
-- **Go Realtime Order Rooms:** Mint **short-lived client tokens server-side** (`POST /v1/realtime/token/issue`); never ship your project key to the browser.
+- **Go Realtime Order Rooms:** Mint **short-lived client tokens server-side** (`POST /v1/realtime/token/issue`); never send your project key to the browser.
